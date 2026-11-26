@@ -50,3 +50,36 @@ class QualityGateService(BaseModuleService):
             if r.get("所属事实表") == fact_table and r.get("status") == "已阻断":
                 return False, f"事实表 {fact_table} 存在阻断的质量闸"
         return True, f"事实表 {fact_table} 质量闸全部放行"
+
+    def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
+        """放行不能在这里直接改状态，必须走放行确认接口留下有效判定与回执。
+
+        ``阻断批次`` 仍可手工留痕，但 ``放行批次`` 只接受放行交接状态机已经
+        确认放行的条目，避免出现「状态已放行、装载却拿不到回执」的断链。
+        """
+        if action != "放行批次":
+            return super().run_action(entry_id, action)
+
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return None, f"{self.ENTITY} {entry_id} 不存在或已归档"
+
+        from app.services.release_control import release_control
+
+        gate_id = str(entry.get("闸口编号", ""))
+        released = release_control.released_application_for_gate(gate_id)
+        if released is None:
+            return None, (
+                f"质量闸 {gate_id} 还没有实际放行的确认结论；"
+                "请先在放行交接看板确认放行，装载窗口才能凭回执推进"
+            )
+        entry["status"] = "已放行"
+        entry["pending"] = False
+        entry["abnormal"] = False
+        entry["判定编号"] = released["judgement"]["judgement_id"]
+        entry["阈值版本"] = f"v{released['judgement']['threshold_version']}"
+        entry["放行回执"] = released["receipt"]["receipt_id"]
+        return entry, (
+            f"质量闸 {gate_id} 沿用放行确认判定 {released['judgement']['judgement_id']}，"
+            f"回执 {released['receipt']['receipt_id']}"
+        )

@@ -68,6 +68,7 @@ npm run dev
 | 装载窗口 | `load_window` | 装载窗口 | 窗口编号、所属事实表、窗口起点 |
 | 重跑任务 | `reprocess_task` | 重跑任务 | 重跑编号、触发原因、影响事实表 |
 | 装配质量闸 | `quality_gate` | 质量闸条目 | 闸口编号、所属事实表、校验项 |
+| 放行交接 | `release_control` | 放行申请 | 申请编号、阈值版本、放行回执 |
 | 血缘关系 | `lineage_edge` | 血缘边 | 血缘编号、上游对象、下游对象 |
 | 维度发布 | `dim_publish` | 发布版本 | 发布编号、所属维度、发布版本 |
 | 建模审计 | `model_audit` | 审计条目 | 条目编号、操作类型、操作对象 |
@@ -80,6 +81,35 @@ npm run dev
   `frontend/src/domain/<模块>.ts`，用于承载真实业务差异并维持36题位容量。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
+
+## 放行交接（质量闸 → 装载窗口）
+
+`app/services/release_control.py` 把「装配质量闸放行」做成一条可核对的交接链，
+前端入口是 `/release_control`（左侧导航「放行交接」），接口前缀 `/api/release`。
+
+- **受理**：`POST /api/release/applications` 冻结受理时的阈值版本与名额语义。
+- **确认**：`POST /api/release/applications/{id}/confirm` 返回换班语境下
+  实际放行或拒绝的原因；只有 `outcome=released` 才签发回执并写入装载待办。
+- **装载**：`POST /api/release/windows/{id}/load` 要求有效回执，
+  被拒、待确认、已核销或与窗口不匹配的回执都会显式挡住。
+- **重新判定**：`POST /api/release/versions` 调阈值/上限后会按新版本重新判定
+  所有待确认申请，`/api/release/handover` 给出变更生效时刻与在途提交的交接结论。
+
+判定优先级固定为 `window_closed > handover_policy > threshold > capacity`：
+已关闭窗口拒绝新放行，放行后名额等于上限仍可放行，超过上限才拒绝；
+窗口关闭与上限调整同一时刻生效时窗口关闭优先。
+
+换班语义由申请受理时的策略决定：
+
+| 策略 | 受理时是否占名额 | 换班后按什么判定 | 名额已满时能否交班 |
+| --- | --- | --- | --- |
+| `reserve` 受理占位 | 是，受理即占住当班名额 | 受理版本的阈值与上限 | 能，按受理阈值交接 |
+| `recompute` 放行重算 | 否，只入队 | 现行阈值版本与剩余名额 | 不能，等待下一班次重新受理 |
+
+幂等：同一 `client_request_id` 的受理与确认都只落一份结果，并发确认同一申请
+只产生一份有效回执；回包不明时 `GET /api/release/applications/{id}`
+可核对已落库的实际结论。演示数据可用 `POST /api/release/reset` 复位为
+「上限 2、两笔待确认、窗口开启」。
 
 领域：数据工程
 子方向：数仓与数据湖

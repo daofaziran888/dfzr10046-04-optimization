@@ -58,3 +58,32 @@ class LoadWindowService(BaseModuleService):
         rows = store.rows(self.MODULE)
         return [dict(r) for r in rows if r.get("所属事实表") == fact_table
                 and (r.get("status") == "装载中断" or r.get("abnormal"))]
+
+    def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
+        """装载推进必须凭质量闸放行的有效回执，被拒/待定的申请显式挡住。
+
+        ``启动装载`` 只做前置核对（回执必须有效且未核销），``确认装载`` 才会
+        真正核销回执并推进水位；两个动作消费的都是质量闸确认时的同一份判定。
+        """
+        if action not in ("启动装载", "确认装载"):
+            return super().run_action(entry_id, action)
+
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return None, f"{self.ENTITY} {entry_id} 不存在或已归档"
+
+        from app.services.release_control import release_control
+
+        receipt_id = str(entry.get("放行回执") or "") or None
+        if action == "启动装载":
+            ok, message, _, _ = release_control.check_load_ready(
+                entry_id, receipt_id=receipt_id)
+            if not ok:
+                return None, message
+            return super().run_action(entry_id, action)
+
+        ok, message, _, _ = release_control.confirm_load(
+            entry_id, receipt_id=receipt_id)
+        if not ok:
+            return None, message
+        return entry, message
